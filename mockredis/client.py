@@ -28,7 +28,6 @@ if sys.version_info >= (3, 0):
 class MockRedis(object):
     """
     A Mock for a redis-py Redis object
-
     Expire functionality must be explicitly
     invoked using do_expire(time). Automatic
     expiry is NOT supported.
@@ -40,10 +39,10 @@ class MockRedis(object):
                  load_lua_dependencies=True,
                  blocking_timeout=1000,
                  blocking_sleep_interval=0.01,
+                 decode_responses=False,
                  **kwargs):
         """
         Initialize as either StrictRedis or Redis.
-
         Defaults to non-strict.
         """
         self.strict = strict
@@ -59,6 +58,7 @@ class MockRedis(object):
         self.pubsub = defaultdict(list)
         # Dictionary from script to sha ''Script''
         self.shas = dict()
+        self.decode_responses = decode_responses
 
     @classmethod
     def from_url(cls, url, db=None, **kwargs):
@@ -70,7 +70,7 @@ class MockRedis(object):
         return self._encode(msg)
 
     def ping(self):
-        return b'PONG'
+        return 'PONG' if self.decode_responses else b'PONG'
 
     # Transactions Functions #
 
@@ -87,7 +87,6 @@ class MockRedis(object):
         Convenience method for executing the callable `func` as a transaction
         while watching all keys specified in `watches`. The 'func' callable
         should expect a single argument which is a Pipeline object.
-
         Copied directly from redis-py.
         """
         shard_hint = kwargs.pop('shard_hint', None)
@@ -137,19 +136,24 @@ class MockRedis(object):
     def type(self, key):
         key = self._encode(key)
         if key not in self.redis:
-            return b'none'
-        type_ = type(self.redis[key])
-        if type_ is dict:
-            return b'hash'
-        elif type_ is str:
-            return b'string'
-        elif type_ is set:
-            return b'set'
-        elif type_ is list:
-            return b'list'
-        elif type_ is SortedSet:
-            return b'zset'
-        raise TypeError("unhandled type {}".format(type_))
+            res = b'none'
+        else:
+            type_ = type(self.redis[key])
+            if type_ is dict:
+                res = b'hash'
+            elif type_ is str:
+                res = b'string'
+            elif type_ is set:
+                res = b'set'
+            elif type_ is list:
+                res = b'list'
+            elif type_ is SortedSet:
+                res = b'zset'
+            else:
+                raise TypeError("unhandled type {}".format(type_))
+        if self.decode_responses:
+            return res.decode('utf-8')
+        return res
 
     def keys(self, pattern='*'):
         """Emulate keys."""
@@ -166,7 +170,9 @@ class MockRedis(object):
         regex = re.compile(re.sub(r'(^|[^\\])\.', r'\1[^/]', regex))
 
         # Find every key that matches the pattern
-        return [key for key in self.redis.keys() if regex.match(key.decode('utf-8'))]
+        return [key for key in self.redis.keys()
+                if regex.match(key if self.decode_responses
+                               else key.decode('utf-8'))]
 
     def delete(self, *keys):
         """Emulate delete."""
@@ -217,12 +223,10 @@ class MockRedis(object):
     def ttl(self, key):
         """
         Emulate ttl
-
         Even though the official redis commands documentation at http://redis.io/commands/ttl
         states "Return value: Integer reply: TTL in seconds, -2 when key does not exist or -1
         when key does not have a timeout." the redis-py lib returns None for both these cases.
         The lib behavior has been emulated here.
-
         :param key: key for which ttl is requested.
         :returns: the number of seconds till timeout, None if the key does not exist or if the
                   key has no timeout(as per the redis-py lib behavior).
@@ -235,7 +239,6 @@ class MockRedis(object):
     def pttl(self, key):
         """
         Emulate pttl
-
         :param key: key for which pttl is requested.
         :returns: the number of milliseconds till timeout, None if the key does not exist or if the
                   key has no timeout(as per the redis-py lib behavior).
@@ -313,7 +316,6 @@ class MockRedis(object):
     def set(self, key, value, ex=None, px=None, nx=False, xx=False):
         """
         Set the ``value`` for the ``key`` in the context of the provided kwargs.
-
         As per the behavior of the redis-py lib:
         If nx and xx are both set, the function does nothing and None is returned.
         If px and ex are both set, the preference is given to px.
@@ -359,7 +361,6 @@ class MockRedis(object):
     def _should_set(self, key, mode):
         """
         Determine if it is okay to set a key.
-
         If the mode is None, returns True, otherwise, returns True of false based on
         the value of ``key`` and the ``mode`` (nx | xx).
         """
@@ -380,16 +381,16 @@ class MockRedis(object):
         # for all other cases, return true
         return True
 
-    def setex(self, name, time, value):
+    def setex(self, key, time, value):
         """
-        Set the value of ``name`` to ``value`` that expires in ``time``
+        Set the value of ``key`` to ``value`` that expires in ``time``
         seconds. ``time`` can be represented by an integer or a Python
         timedelta object.
         """
         if not self.strict:
             # when not strict mode swap value and time args order
             time, value = value, time
-        return self.set(name, value, ex=time)
+        return self.set(key, value, ex=time)
 
     def psetex(self, key, time, value):
         """
@@ -408,15 +409,12 @@ class MockRedis(object):
         Sets key/values based on a mapping. Mapping can be supplied as a single
         dictionary argument or as kwargs.
         """
-        mapping = kwargs
         if args:
             if len(args) != 1 or not isinstance(args[0], dict):
                 raise RedisError('MSET requires **kwargs or a single dict arg')
-            mapping.update(args[0])
-
-        if len(mapping) == 0:
-            raise ResponseError("wrong number of arguments for 'mset' command")
-
+            mapping = args[0]
+        else:
+            mapping = kwargs
         for key, value in mapping.items():
             self.set(key, value)
         return True
@@ -433,9 +431,6 @@ class MockRedis(object):
             mapping = args[0]
         else:
             mapping = kwargs
-
-        if len(mapping) == 0:
-            raise ResponseError("wrong number of arguments for 'msetnx' command")
 
         for key in mapping.keys():
             if self._encode(key) in self.redis:
@@ -821,15 +816,17 @@ class MockRedis(object):
                 return []
 
         by = self._encode(by) if by is not None else by
+        by_special = dict(zip(('*', 'nosort', '#'),
+                              [self._encode(x) for x in (b'*', b'nosort', b'#')]))
         # always organize the items as tuples of the value from the list and the sort key
-        if by and b'*' in by:
-            items = [(i, self.get(by.replace(b'*', self._encode(i)))) for i in items]
-        elif by in [None, b'nosort']:
+        if by and by_special['*'] in by:
+            items = [(i, self.get(by.replace(by_special['*'], self._encode(i)))) for i in items]
+        elif by in [None, by_special['nosort']]:
             items = [(i, i) for i in items]
         else:
             raise ValueError('invalid value for "by": %s' % by)
 
-        if by != b'nosort':
+        if by != by_special['nosort']:
             # if sorting, do alpha sort or float (default) and take desc flag into account
             sort_type = alpha and str or float
             items.sort(key=lambda x: sort_type(x[1]), reverse=bool(desc))
@@ -841,10 +838,10 @@ class MockRedis(object):
                 # always deal with get specifiers as a list
                 get = [get]
             for g in map(self._encode, get):
-                if g == b'#':
+                if g == by_special['#']:
                     results.append([self.get(i) for i in items])
                 else:
-                    results.append([self.get(g.replace(b'*', self._encode(i[0]))) for i in items])
+                    results.append([self.get(g.replace(by_special['*'], self._encode(i[0]))) for i in items])
         else:
             # if not using GET then returning just the item itself
             results.append([i[0] for i in items])
@@ -882,7 +879,6 @@ class MockRedis(object):
     def _common_scan(self, values_function, cursor='0', match=None, count=10, key=None):
         """
         Common scanning skeleton.
-
         :param key: optional function used to identify what 'match' is applied to
         """
         if count is None:
@@ -902,7 +898,10 @@ class MockRedis(object):
         values = values[cursor:cursor+count]
 
         if match is not None:
-            regex = re.compile(b'^' + re.escape(self._encode(match)).replace(b'\\*', b'.*') + b'$')
+            m_special = dict(zip(('^', '*', '.*', '$'),
+                                 [self._encode(x) for x in (b'^', b'\\*', b'.*', b'$')]))
+            regex = re.compile(m_special['^'] + re.escape(self._encode(match)).replace(m_special['*'],
+                                                                                         m_special['.*']) + m_special['$'])
             if not key:
                 key = lambda v: v
             values = [v for v in values if regex.match(key(v))]
@@ -1344,7 +1343,6 @@ class MockRedis(object):
     def call(self, command, *args):
         """
         Sends call to the function, whose name is specified by command.
-
         Used by Script invocations and normalizes calls using standard
         Redis arguments to use the expected redis-py arguments.
         """
@@ -1467,7 +1465,8 @@ class MockRedis(object):
         Get (and maybe create) a redis data structure by name and type.
         """
         key = self._encode(key)
-        if self.type(key) in [type_, b'none']:
+        keys = [self._encode(x) for x in (type_, b'none')]
+        if self.type(key) in keys:
             if create:
                 return self.redis.setdefault(key, default)
             else:
@@ -1551,7 +1550,7 @@ class MockRedis(object):
     def _encode(self, value):
         "Return a bytestring representation of the value. Taken from redis-py connection.py"
         if isinstance(value, bytes):
-            return value
+            value = value
         elif isinstance(value, (int, long)):
             value = str(value).encode('utf-8')
         elif isinstance(value, float):
@@ -1560,6 +1559,9 @@ class MockRedis(object):
             value = str(value).encode('utf-8')
         else:
             value = value.encode('utf-8', 'strict')
+
+        if self.decode_responses:
+            return value.decode('utf-8')
         return value
 
 
@@ -1573,7 +1575,7 @@ def mock_redis_client(**kwargs):
     can return a MockRedis object
     instead of a Redis object.
     """
-    return MockRedis()
+    return MockRedis(**kwargs)
 
 mock_redis_client.from_url = mock_redis_client
 
@@ -1584,6 +1586,6 @@ def mock_strict_redis_client(**kwargs):
     can return a MockRedis object
     instead of a StrictRedis object.
     """
-    return MockRedis(strict=True)
+    return MockRedis(strict=True, **kwargs)
 
 mock_strict_redis_client.from_url = mock_strict_redis_client
