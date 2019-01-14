@@ -184,6 +184,8 @@ class MockRedis(object):
             if key in self.timeouts:
                 del self.timeouts[key]
         return key_counter
+    
+    unlink = delete
 
     def __delitem__(self, name):
         if self.delete(name) == 0:
