@@ -1436,6 +1436,14 @@ class MockRedis(object):
     def publish(self, channel, message):
         self.pubsub[channel].append(message)
 
+    # (some) Stream commands #
+
+    def xadd(self, name, fields, id='*', maxlen=None, approximate=True):
+        return f'{int(round(time.time() * 1000))}-1'
+
+    def xrange(self, name, min='-', max='+', count=None):
+        return {}
+
     # Internal #
 
     def _get_list(self, key, operation, create=False):
